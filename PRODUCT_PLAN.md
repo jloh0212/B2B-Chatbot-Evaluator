@@ -499,8 +499,13 @@ Go to https://github.com/jloh0212/B2B-Chatbot-Evaluator in your browser. You sho
 
 Every time you make changes to the app and want to save them to GitHub:
 
-1. Open a real Terminal window (not Claude Code)
-2. Run these three commands one at a time:
+1. Open a real Terminal window using one of these methods:
+   - **Option A:** Press **Cmd+Space**, type **Terminal**, press Enter
+   - **Option B:** If Terminal is already open, go to the menu bar → **Shell** → **New Window**
+   - **Option C:** Open **Finder** → **Applications** → **Utilities** → double-click **Terminal**
+
+   Do NOT use the terminal inside Claude Code — Git commands will not work there.
+2. Run these commands one at a time:
 
 ```
 cd /Users/C5405025/Desktop/tutorial-01/eval
