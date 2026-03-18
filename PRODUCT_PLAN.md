@@ -346,67 +346,201 @@ No other files from the original project are required.
 
 ## Publishing to GitHub
 
-### Prerequisites
-- A GitHub account — sign up at github.com if you don't have one
-- Git installed — run `git --version` in Terminal to check; macOS will prompt you to install it if missing
+**Repository:** https://github.com/jloh0212/B2B-Chatbot-Evaluator
 
-### What gets published and what stays private
+---
 
-The `.gitignore` file (already created in `eval/`) ensures these are **never uploaded**:
-- `.env` — your API key
+### What is GitHub and why use it?
+
+GitHub is a website that stores your code online. It acts as a backup, lets you track changes over time, and makes it easy to share your app with others. Think of it like Google Drive but for code.
+
+---
+
+### What is a .gitignore file and why does it matter?
+
+When you publish to GitHub, every file in your folder gets uploaded — including sensitive files like your API key. A `.gitignore` file is a simple list that tells GitHub "don't upload these files". This protects your API key and keeps private data off the internet.
+
+**The `.gitignore` file is already created** in your `eval/` folder. It protects:
+- `.env` — your Anthropic API key
 - `data/versions/*.json` — your local evaluation results
-- `__pycache__/`, `.DS_Store` — system/cache files
+- `__pycache__/`, `.DS_Store` — system junk files
 
-Everything else (all source code, `PRODUCT_PLAN.md`, `requirements.txt`, `run.command`) is safe to publish.
+You do not need to create or edit it — it is already done.
 
-### One-time setup — create the repository on GitHub
+**Note: `.gitignore` is NOT created automatically by Claude Code or GitHub.** You must create it manually at the start of every new project before pushing to GitHub. If you skip this step, private files like your API key could be uploaded publicly.
 
-1. Go to github.com → click **New** (top left, or the + icon)
-2. Name the repository (e.g. `b2b-chatbot-evaluator`)
-3. Choose **Public** (anyone can see it) or **Private** (only you)
-4. Leave all other options unchecked — do not add a README or .gitignore from GitHub
-5. Click **Create repository**
-6. Copy the repository URL shown on the next page (e.g. `https://github.com/your-username/b2b-chatbot-evaluator.git`)
+**If you ever need to create a `.gitignore` from scratch on a new project:**
 
-### One-time setup — push your code from Terminal
+**Option A — Using VS Code:**
+1. Open your project folder in VS Code
+2. In the left sidebar, hover over the folder name → click the **New File** icon (looks like a page with a + sign)
+3. Name the file exactly `.gitignore` — dot at the start, no spaces, no extension — press Enter
+4. The blank file opens in the editor. Type your exclusions directly into it, one per line:
 
-Open Terminal and run these commands one at a time:
+   ```
+   ┌─────────────────────────────────────┐
+   │ .gitignore                          │
+   ├─────────────────────────────────────┤
+   │ .env                                │  ← your API key file
+   │ data/versions/*.json                │  ← local saved results
+   │ __pycache__/                        │  ← Python cache folder
+   │ .DS_Store                           │  ← macOS system file
+   └─────────────────────────────────────┘
+   ```
 
-```bash
+5. Press **Cmd+S** to save
+
+**Option B — Using Terminal:**
+1. Open Terminal and navigate to your project folder:
+   ```
+   cd /path/to/your/project
+   ```
+2. Create the file and open it in TextEdit:
+   ```
+   touch .gitignore && open -e .gitignore
+   ```
+3. TextEdit opens with a blank file. Type your exclusions one per line (same content as shown above)
+4. Save with **Cmd+S** and close TextEdit
+
+Either way, once saved, GitHub will skip everything listed when you push.
+
+---
+
+### What is a personal access token?
+
+GitHub no longer accepts your normal login password when pushing from Terminal. Instead it uses a personal access token — a long string of characters that acts as a secure password just for this purpose.
+
+**How to create one (one time only):**
+
+1. Go to github.com and log in
+2. Click your profile photo (top right) → **Settings**
+3. Scroll down the left sidebar → click **Developer settings**
+4. Click **Personal access tokens** → **Tokens (classic)**
+5. Click **Generate new token** → **Generate new token (classic)**
+6. Fill in:
+   - **Note:** give it a name e.g. `b2b-evaluator`
+   - **Expiration:** choose a date (e.g. 12/31/2026)
+   - **Scopes:** tick the box next to **repo** — this selects all sub-boxes automatically
+7. Scroll to the bottom → click **Generate token**
+8. **Copy the token immediately** — it starts with `ghp_...` and GitHub will never show it again after you leave this page
+9. Save it somewhere safe — paste it into your Notes app or a password manager
+
+**When Terminal asks for your password**, paste this token. Nothing will appear as you type — that is normal, just press Enter.
+
+**You do not generate a new token every time.** Reuse the same token until it expires. When it expires, go back to the same location and generate a new one.
+
+**Never share your token** or include it in any file that gets uploaded to GitHub.
+
+---
+
+### Step-by-step: pushing to GitHub for the first time
+
+You only do these steps once. They have already been completed for this project.
+
+**Before you start, you need:**
+- A GitHub account (github.com)
+- A personal access token (see instructions above)
+- Your project files in a folder on your Mac
+
+**Step 1 — Create an empty repository on GitHub**
+
+1. Go to github.com and log in
+2. Click the **+** icon (top right) → **New repository**
+3. Fill in:
+   - **Repository name:** e.g. `B2B-Chatbot-Evaluator`
+   - **Visibility:** Public (anyone can see) or Private (only you)
+   - Leave **Add README**, **Add .gitignore**, and **Add license** all turned off
+4. Click **Create repository**
+5. Copy the URL shown on the next page — it looks like `https://github.com/your-username/your-repo-name.git`
+
+**Step 2 — Open a real Terminal window**
+
+- Press **Cmd+Space** → type **Terminal** → press Enter
+- Or in the menu bar: **Shell → New Window**
+
+> Important: do not use the terminal inside Claude Code — Git commands will not run there.
+
+**Step 3 — Run these commands one at a time**
+
+Copy and paste each line into Terminal, press Enter, and wait for it to finish before running the next one:
+
+```
 cd /Users/C5405025/Desktop/tutorial-01/eval
+```
+```
 git init
+```
+```
 git add .
+```
+```
 git commit -m "Initial commit"
-git remote add origin https://github.com/YOUR_USERNAME/YOUR_REPO_NAME.git
+```
+```
+git remote set-url origin https://jloh0212@github.com/jloh0212/B2B-Chatbot-Evaluator.git
+```
+```
 git push -u origin main
 ```
 
-Replace the URL in the fourth line with the one you copied from GitHub.
+**Step 4 — Enter your credentials when prompted**
 
-After the final command, refresh your GitHub repository page — all your files should be visible. Confirm that `.env` is **not** listed.
+Terminal will ask for:
+- **Username:** your GitHub username (e.g. `jloh0212`)
+- **Password:** paste your personal access token — nothing will appear as you type, that is normal — then press Enter
+
+**Step 5 — Confirm it worked**
+
+Go to https://github.com/jloh0212/B2B-Chatbot-Evaluator in your browser. You should see all your files. Check that `.env` is **not** listed — if it is missing from the list, your API key is protected correctly.
+
+---
 
 ### Publishing future changes
 
-Whenever you make changes and want to save them to GitHub:
+Every time you make changes to the app and want to save them to GitHub:
 
-```bash
+1. Open a real Terminal window (not Claude Code)
+2. Run these three commands one at a time:
+
+```
 cd /Users/C5405025/Desktop/tutorial-01/eval
+```
+```
 git add .
-git commit -m "Describe what you changed"
+```
+```
+git commit -m "Brief description of what you changed"
+```
+```
 git push
 ```
 
-### Sharing with someone else
+3. When prompted for password, paste your personal access token
 
-Send them the GitHub repository URL. They clone it:
+That's it — your changes are now saved online.
 
-```bash
-git clone https://github.com/YOUR_USERNAME/YOUR_REPO_NAME.git
-cd YOUR_REPO_NAME
+---
+
+### Sharing the app with someone else
+
+1. Send them this link: https://github.com/jloh0212/B2B-Chatbot-Evaluator
+2. They open Terminal and run:
+
+```
+git clone https://github.com/jloh0212/B2B-Chatbot-Evaluator.git
+```
+```
+cd B2B-Chatbot-Evaluator
+```
+```
 pip3 install -r requirements.txt
 ```
 
-They then create their own `.env` file with their own Anthropic API key, and double-click `run.command` to launch.
+3. They create a new `.env` file in the folder with their own Anthropic API key:
+   ```
+   ANTHROPIC_API_KEY=their-key-here
+   ```
+4. They double-click `run.command` to launch the app
 
 ---
 
