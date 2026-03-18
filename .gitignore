@@ -1,0 +1,19 @@
+# .gitignore — files that should never be committed to GitHub
+
+# API keys and secrets
+.env
+
+# Saved evaluation results (local data, not source code)
+data/versions/*.json
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+.Python
+
+# macOS system files
+.DS_Store
+
+# VS Code settings
+.vscode/
