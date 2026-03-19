@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -26,6 +27,8 @@ from rules import (
 )
 from rubric import RUBRIC
 from scenarios import Scenario
+from metric_types import MetricResult, metric_score_label
+from metrics import METRICS, compute_m4_instruction_following, compute_m5_calibration
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +38,8 @@ logger = logging.getLogger(__name__)
 MODEL = "claude-sonnet-4-6"
 JUDGE_TEMPERATURE = 0.0
 JUDGE_MAX_TOKENS = 1024
+METRIC_MODEL = "claude-haiku-4-5-20251001"
+METRIC_MAX_TOKENS = 512
 
 PRINCIPLES = ["P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9", "P10"]
 
@@ -114,7 +119,8 @@ class EvaluationResult:
     score_label: str
     risk_flags: list[dict]
     top_gaps: list[GapItem]
-    eval_metadata: dict
+    metric_results: dict[str, MetricResult] = field(default_factory=dict)
+    eval_metadata: dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -478,8 +484,15 @@ BUSINESS_IMPACT = {
 # ---------------------------------------------------------------------------
 
 class EvaluationEngine:
-    def __init__(self, api_key: str | None = None):
+    def __init__(
+        self,
+        api_key: str | None = None,
+        judge_model: str = MODEL,
+        metric_model: str = METRIC_MODEL,
+    ):
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+        self.judge_model = judge_model
+        self.metric_model = metric_model
         self._client: anthropic.Anthropic | None = None
 
     @property
@@ -603,6 +616,8 @@ class EvaluationEngine:
         )
         top_gaps = all_gap_items[:5]
 
+        metric_results = self._run_metrics(response_text, scenario, principle_results, run_llm_judge)
+
         return EvaluationResult(
             run_id=run_id,
             timestamp=timestamp,
@@ -615,10 +630,12 @@ class EvaluationEngine:
             score_label=score_label(weighted_composite),
             risk_flags=risk_flags,
             top_gaps=top_gaps,
+            metric_results=metric_results,
             eval_metadata={
-                "model": MODEL,
+                "model": self.judge_model,
+                "metric_model": self.metric_model,
                 "temperature": JUDGE_TEMPERATURE,
-                "rule_checks_run": len(principles) * 3,  # ~3 checks per principle avg
+                "rule_checks_run": len(principles) * 3,
                 "llm_judge_calls": llm_judge_calls,
                 "total_violations": total_violations,
                 "run_llm_judge": run_llm_judge,
@@ -686,9 +703,7 @@ class EvaluationEngine:
 
     def _make_judge_call(self, prompt: str, seed: int) -> dict:
         response = self.client.messages.create(
-            model=MODEL,
-            max_tokens=JUDGE_MAX_TOKENS,
-            temperature=JUDGE_TEMPERATURE,
+            model=self.judge_model,
             messages=[{"role": "user", "content": prompt}],
         )
         raw = response.content[0].text if response.content else ""
@@ -762,3 +777,317 @@ class EvaluationEngine:
         # LLM score can bring the score up to the cap, or down
         final = min(llm_score, cap)
         return max(1, final)
+
+    # ---------------------------------------------------------------------------
+    # M1-M5 Quality Metrics
+    # ---------------------------------------------------------------------------
+
+    def _run_metrics(
+        self,
+        response_text: str,
+        scenario,
+        principle_results: dict,
+        run_llm_judge: bool,
+    ) -> dict[str, MetricResult]:
+        results: dict[str, MetricResult] = {}
+        try:
+            results["M1"] = self._compute_m1_faithfulness(response_text, scenario, run_llm_judge)
+        except Exception as e:
+            logger.warning(f"M1 failed: {e}")
+            results["M1"] = MetricResult("M1", METRICS["M1"]["name"], None, "N/A", "unavailable", f"Error: {e}", "", [])
+        try:
+            results["M2"] = self._compute_m2_answer_relevance(response_text, scenario, run_llm_judge)
+        except Exception as e:
+            logger.warning(f"M2 failed: {e}")
+            results["M2"] = MetricResult("M2", METRICS["M2"]["name"], None, "N/A", "unavailable", f"Error: {e}", "", [])
+        try:
+            results["M3"] = self._compute_m3_groundedness(response_text, scenario, run_llm_judge)
+        except Exception as e:
+            logger.warning(f"M3 failed: {e}")
+            results["M3"] = MetricResult("M3", METRICS["M3"]["name"], None, "N/A", "unavailable", f"Error: {e}", "", [])
+        try:
+            results["M4"] = compute_m4_instruction_following(response_text, scenario)
+        except Exception as e:
+            logger.warning(f"M4 failed: {e}")
+            results["M4"] = MetricResult("M4", METRICS["M4"]["name"], None, "N/A", "unavailable", f"Error: {e}", "", [])
+        try:
+            results["M5"] = compute_m5_calibration(principle_results)
+        except Exception as e:
+            logger.warning(f"M5 failed: {e}")
+            results["M5"] = MetricResult("M5", METRICS["M5"]["name"], None, "N/A", "unavailable", f"Error: {e}", "", [])
+        return results
+
+    def _make_metric_llm_call(self, prompt: str) -> dict:
+        """LLM call using metric_model for M1-M3. Separate from judge calls."""
+        response = self.client.messages.create(
+            model=self.metric_model,
+            max_tokens=METRIC_MAX_TOKENS,
+            temperature=0.0,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = response.content[0].text if response.content else ""
+        return {"raw": raw}
+
+    def _parse_metric_json(self, raw: str, score_key: str) -> tuple[float | None, str]:
+        """Parse JSON from metric LLM call; return (score, rationale)."""
+        import re as _re
+        for attempt in [raw, _re.search(r'\{[^{}]+\}', raw, _re.DOTALL)]:
+            text = attempt if isinstance(attempt, str) else (attempt.group() if attempt else None)
+            if not text:
+                continue
+            try:
+                data = json.loads(text)
+                score = data.get(score_key)
+                if score is not None:
+                    score = max(0.0, min(1.0, float(score)))
+                rationale = data.get("rationale", "")
+                return score, rationale
+            except (json.JSONDecodeError, ValueError):
+                continue
+        logger.warning(f"Metric JSON parse failed. Raw: {raw[:200]}")
+        return None, "Parse error"
+
+    def _compute_m1_faithfulness(
+        self, response_text: str, scenario, run_llm_judge: bool
+    ) -> MetricResult:
+        from metrics import M1_FAITHFULNESS_PROMPT
+        flags: list[str] = []
+
+        # Rule: extract SKU-like tokens and check against agent_context
+        sku_pattern = re.compile(r'\b[A-Z][A-Z0-9\-]{4,}\b')
+        response_skus = set(sku_pattern.findall(response_text))
+        context_text = scenario.agent_context.upper()
+
+        missing_skus = [s for s in response_skus if s not in context_text]
+
+        price_pattern = re.compile(r'(USD|EUR|\$|€)\s*[\d,]+(\.\d+)?')
+        response_has_price = bool(price_pattern.search(response_text))
+        context_has_price = bool(price_pattern.search(scenario.agent_context))
+
+        if missing_skus:
+            flags.append("M1_SKU_NOT_IN_CONTEXT")
+            rule_score = 0.0
+        elif response_has_price and not context_has_price:
+            flags.append("M1_PRICE_NOT_IN_CONTEXT")
+            rule_score = 0.5
+        else:
+            rule_score = 1.0
+
+        if not run_llm_judge or rule_score == 0.0:
+            # Skip LLM if rule already hard-fails, or LLM is off
+            label = metric_score_label(rule_score)
+            rationale = "SKU(s) not found in context: " + ", ".join(missing_skus) if missing_skus else "All SKUs grounded in context."
+            return MetricResult(
+                metric_id="M1",
+                name=METRICS["M1"]["name"],
+                score=round(rule_score, 3),
+                score_label=label,
+                method="rule",
+                rationale=rationale,
+                evidence=f"{len(response_skus)} SKUs found in response, {len(missing_skus)} not in context",
+                raw_flags=flags,
+            )
+
+        # LLM (Haiku)
+        last_user = next(
+            (t["content"] for t in reversed(scenario.conversation) if t["role"] == "user"), ""
+        )
+        prompt = M1_FAITHFULNESS_PROMPT.format(
+            agent_context=scenario.agent_context[:600],
+            user_message=last_user[:400],
+            response_text=response_text[:1000],
+            rule_flags=", ".join(flags) if flags else "None",
+        )
+        try:
+            raw_result = self._make_metric_llm_call(prompt)
+            llm_score, llm_rationale = self._parse_metric_json(raw_result["raw"], "faithfulness_score")
+        except Exception as e:
+            logger.warning(f"M1 LLM call failed: {e}")
+            llm_score = None
+
+        if llm_score is not None:
+            combined = (rule_score + llm_score) / 2.0
+            method = "combined"
+            rationale = llm_rationale or f"Rule: {rule_score:.2f}, LLM: {llm_score:.2f}"
+        else:
+            combined = rule_score
+            method = "rule"
+            rationale = "LLM call failed; using rule score only."
+
+        return MetricResult(
+            metric_id="M1",
+            name=METRICS["M1"]["name"],
+            score=round(combined, 3),
+            score_label=metric_score_label(combined),
+            method=method,
+            rationale=rationale,
+            evidence=f"Rule: {rule_score:.2f}" + (f", LLM: {llm_score:.2f}" if llm_score is not None else ""),
+            raw_flags=flags,
+        )
+
+    def _compute_m2_answer_relevance(
+        self, response_text: str, scenario, run_llm_judge: bool
+    ) -> MetricResult:
+        from metrics import M2_RELEVANCE_PROMPT
+        flags: list[str] = []
+
+        # Rule: classify intent and check response for matching signals
+        last_user = next(
+            (t["content"] for t in reversed(scenario.conversation) if t["role"] == "user"), ""
+        ).lower()
+        response_lower = response_text.lower()
+
+        # Intent classification
+        intent_signals = {
+            "price": ["price", "cost", "quote", "usd", "eur", "$", "budget", "rate", "tier"],
+            "stock": ["stock", "inventory", "available", "units", "qty", "quantity"],
+            "delivery": ["deliver", "ship", "lead time", "arrival", "timeline", "days"],
+            "order": ["order", "purchase", "cart", "checkout", "buy", "procure"],
+            "general": [],
+        }
+        detected_intent = "general"
+        for intent, keywords in intent_signals.items():
+            if any(kw in last_user for kw in keywords):
+                detected_intent = intent
+                break
+
+        # Check if response addresses the detected intent
+        intent_response_signals = {
+            "price": ["price", "cost", "usd", "eur", "$", "quote", "indicative", "budget"],
+            "stock": ["stock", "available", "units", "inventory", "in stock", "out of stock"],
+            "delivery": ["deliver", "ship", "days", "lead time", "arrival", "week"],
+            "order": ["order", "confirm", "cart", "add", "proceed", "quantity"],
+            "general": ["can", "would", "help", "assist"],
+        }
+        response_signals = intent_response_signals.get(detected_intent, [])
+        addressed = any(sig in response_lower for sig in response_signals) if response_signals else True
+
+        if not addressed:
+            flags.append("M2_INTENT_NOT_ADDRESSED")
+            rule_score = 0.3
+        else:
+            rule_score = 0.8
+
+        if not run_llm_judge:
+            return MetricResult(
+                metric_id="M2",
+                name=METRICS["M2"]["name"],
+                score=round(rule_score, 3),
+                score_label=metric_score_label(rule_score),
+                method="rule",
+                rationale=f"Intent: {detected_intent}. Response {'addresses' if addressed else 'does not address'} detected intent.",
+                evidence=f"Detected intent: {detected_intent}",
+                raw_flags=flags,
+            )
+
+        # LLM (Haiku)
+        prompt = M2_RELEVANCE_PROMPT.format(
+            detected_intent=detected_intent,
+            user_message=last_user[:400],
+            response_text=response_text[:1000],
+            rule_flags=", ".join(flags) if flags else "None",
+        )
+        try:
+            raw_result = self._make_metric_llm_call(prompt)
+            llm_score, llm_rationale = self._parse_metric_json(raw_result["raw"], "relevance_score")
+        except Exception as e:
+            logger.warning(f"M2 LLM call failed: {e}")
+            llm_score = None
+
+        if llm_score is not None:
+            combined = (rule_score + llm_score) / 2.0
+            method = "combined"
+            rationale = llm_rationale or f"Rule: {rule_score:.2f}, LLM: {llm_score:.2f}"
+        else:
+            combined = rule_score
+            method = "rule"
+            rationale = f"LLM call failed. Intent: {detected_intent}."
+
+        return MetricResult(
+            metric_id="M2",
+            name=METRICS["M2"]["name"],
+            score=round(combined, 3),
+            score_label=metric_score_label(combined),
+            method=method,
+            rationale=rationale,
+            evidence=f"Intent: {detected_intent}" + (f", LLM: {llm_score:.2f}" if llm_score is not None else ""),
+            raw_flags=flags,
+        )
+
+    def _compute_m3_groundedness(
+        self, response_text: str, scenario, run_llm_judge: bool
+    ) -> MetricResult:
+        from metrics import M3_GROUNDEDNESS_PROMPT
+        flags: list[str] = []
+
+        # Rule: sentence-level lexical overlap with agent_context
+        context_words = set(re.findall(r'\b\w{4,}\b', scenario.agent_context.lower()))
+        response_sentences = re.split(r'[.!?\n]+', response_text)
+        response_sentences = [s.strip() for s in response_sentences if s.strip()]
+
+        if not response_sentences or not context_words:
+            rule_score = 0.5
+            evidence = "Insufficient text for overlap analysis"
+        else:
+            overlaps = []
+            for sentence in response_sentences:
+                words = set(re.findall(r'\b\w{4,}\b', sentence.lower()))
+                if words:
+                    overlap = len(words & context_words) / len(words)
+                    overlaps.append(overlap)
+            lexical_ratio = sum(overlaps) / len(overlaps) if overlaps else 0.0
+            rule_score = lexical_ratio
+            evidence = f"Lexical overlap: {lexical_ratio:.0%} across {len(response_sentences)} sentences"
+
+            if lexical_ratio < 0.5:
+                flags.append("M3_LOW_LEXICAL_OVERLAP")
+
+        if not run_llm_judge:
+            return MetricResult(
+                metric_id="M3",
+                name=METRICS["M3"]["name"],
+                score=round(rule_score, 3),
+                score_label=metric_score_label(rule_score),
+                method="rule",
+                rationale=f"Lexical overlap with context: {rule_score:.0%}." + (" Low overlap detected." if flags else ""),
+                evidence=evidence,
+                raw_flags=flags,
+            )
+
+        # LLM (Haiku)
+        last_user = next(
+            (t["content"] for t in reversed(scenario.conversation) if t["role"] == "user"), ""
+        )
+        prompt = M3_GROUNDEDNESS_PROMPT.format(
+            agent_context=scenario.agent_context[:600],
+            user_message=last_user[:400],
+            response_text=response_text[:1000],
+            rule_flags=", ".join(flags) if flags else "None",
+        )
+        try:
+            raw_result = self._make_metric_llm_call(prompt)
+            llm_score, llm_rationale = self._parse_metric_json(raw_result["raw"], "groundedness_score")
+        except Exception as e:
+            logger.warning(f"M3 LLM call failed: {e}")
+            llm_score = None
+
+        # Final: LLM score when available, else lexical ratio
+        if llm_score is not None:
+            final_score = llm_score
+            method = "llm"
+            rationale = llm_rationale or f"LLM groundedness: {llm_score:.2f}"
+        else:
+            final_score = rule_score
+            method = "rule"
+            rationale = f"LLM call failed; lexical overlap: {rule_score:.0%}."
+
+        return MetricResult(
+            metric_id="M3",
+            name=METRICS["M3"]["name"],
+            score=round(final_score, 3),
+            score_label=metric_score_label(final_score),
+            method=method,
+            rationale=rationale,
+            evidence=evidence + (f", LLM: {llm_score:.2f}" if llm_score is not None else ""),
+            raw_flags=flags,
+        )

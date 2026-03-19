@@ -26,7 +26,7 @@ import pandas as pd
 
 from evaluator import EvaluationEngine, score_label
 from report import generate_json_report, generate_display_summary
-from scenarios import SCENARIOS, SCENARIO_MAP
+from scenarios import SCENARIOS, SCENARIO_MAP, AGENT_TYPES
 from versions import VersionStore
 from conversation_builder import (
     ConversationBuilder,
@@ -41,12 +41,16 @@ logger = logging.getLogger(__name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
-_engine: EvaluationEngine | None = None
 _store = VersionStore()
-_builder: ConversationBuilder | None = None
 
-SCENARIO_CHOICES = [f"{s.id} — {s.industry}: {s.tags[0]}" for s in SCENARIOS]
-SCENARIO_ID_MAP = {f"{s.id} — {s.industry}: {s.tags[0]}": s.id for s in SCENARIOS}
+def _scenario_label(s) -> str:
+    return f"{s.id} — {s.industry}: {s.tags[0]}"
+
+
+SCENARIO_CHOICES = [_scenario_label(s) for s in SCENARIOS]
+SCENARIO_ID_MAP = {_scenario_label(s): s.id for s in SCENARIOS}
+
+AGENT_TYPE_CHOICES = ["All"] + AGENT_TYPES
 
 INDUSTRY_CHOICES = ["Electronics", "Fashion", "Grocery", "Furniture"]
 TAG_CHOICES = [
@@ -55,20 +59,25 @@ TAG_CHOICES = [
 ]
 
 
-def get_engine() -> EvaluationEngine:
-    global _engine
-    if _engine is None:
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        _engine = EvaluationEngine(api_key=api_key)
-    return _engine
+MODEL_CHOICES = [
+    "claude-haiku-4-5-20251001",
+    "claude-sonnet-4-6",
+    "claude-opus-4-6",
+]
+
+DEFAULT_JUDGE_MODEL = "claude-sonnet-4-6"
+DEFAULT_METRIC_MODEL = "claude-haiku-4-5-20251001"
+DEFAULT_BUILDER_MODEL = "claude-sonnet-4-6"
 
 
-def get_builder() -> ConversationBuilder:
-    global _builder
-    if _builder is None:
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        _builder = ConversationBuilder(api_key=api_key)
-    return _builder
+def get_engine(judge_model: str = DEFAULT_JUDGE_MODEL, metric_model: str = DEFAULT_METRIC_MODEL) -> EvaluationEngine:
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    return EvaluationEngine(api_key=api_key, judge_model=judge_model, metric_model=metric_model)
+
+
+def get_builder(builder_model: str = DEFAULT_BUILDER_MODEL) -> ConversationBuilder:
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    return ConversationBuilder(api_key=api_key, builder_model=builder_model)
 
 
 def _scores_to_df(result) -> pd.DataFrame:
@@ -90,11 +99,54 @@ def _scores_to_df(result) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _metrics_to_df(result) -> pd.DataFrame:
+    rows = []
+    for m_id in ["M1", "M2", "M3", "M4", "M5"]:
+        if m_id not in result.metric_results:
+            continue
+        mr = result.metric_results[m_id]
+        if mr.score is None:
+            emoji = "⬜"
+            score_str = "N/A"
+        elif mr.score >= 0.75:
+            emoji = "🟢"
+            score_str = f"{mr.score:.0%}"
+        elif mr.score >= 0.50:
+            emoji = "🟡"
+            score_str = f"{mr.score:.0%}"
+        else:
+            emoji = "🔴"
+            score_str = f"{mr.score:.0%}"
+        rows.append({
+            "Metric": m_id,
+            "Name": mr.name,
+            "Score": f"{emoji} {score_str}",
+            "Label": mr.score_label,
+            "Method": mr.method,
+            "Flags": ", ".join(mr.raw_flags) if mr.raw_flags else "—",
+            "Rationale": mr.rationale[:100] if mr.rationale else "—",
+        })
+    return pd.DataFrame(rows)
+
+
 def _risk_color(text: str) -> str:
     """Wrap P9 critical violation markers with red styling."""
     if "CRITICAL" in text or "P9_" in text:
         return f'<span style="color:red;font-weight:bold">{text}</span>'
     return text
+
+
+# ---------------------------------------------------------------------------
+# Agent type filter helper
+# ---------------------------------------------------------------------------
+
+def filter_scenarios_by_agent_type(agent_type: str):
+    if agent_type == "All":
+        choices = SCENARIO_CHOICES
+    else:
+        choices = [_scenario_label(s) for s in SCENARIOS if s.agent_type == agent_type]
+    value = choices[0] if choices else None
+    return gr.update(choices=choices, value=value)
 
 
 # ---------------------------------------------------------------------------
@@ -106,16 +158,18 @@ def evaluate_response(
     version_id: str,
     response_text: str,
     run_llm: bool,
-) -> tuple[str, pd.DataFrame, str]:
+    judge_model: str = DEFAULT_JUDGE_MODEL,
+    metric_model: str = DEFAULT_METRIC_MODEL,
+) -> tuple[str, pd.DataFrame, pd.DataFrame, str]:
     if not response_text.strip():
-        return "⚠️ Please enter a response to evaluate.", pd.DataFrame(), "{}"
+        return "⚠️ Please enter a response to evaluate.", pd.DataFrame(), pd.DataFrame(), "{}"
 
     scenario_id = SCENARIO_ID_MAP.get(scenario_choice)
     if not scenario_id or scenario_id not in SCENARIO_MAP:
-        return "⚠️ Invalid scenario selected.", pd.DataFrame(), "{}"
+        return "⚠️ Invalid scenario selected.", pd.DataFrame(), pd.DataFrame(), "{}"
 
     scenario = SCENARIO_MAP[scenario_id]
-    engine = get_engine()
+    engine = get_engine(judge_model=judge_model, metric_model=metric_model)
 
     try:
         result = engine.evaluate_response(
@@ -126,7 +180,7 @@ def evaluate_response(
         )
     except Exception as e:
         logger.exception("Evaluation failed")
-        return f"❌ Evaluation error: {e}", pd.DataFrame(), "{}"
+        return f"❌ Evaluation error: {e}", pd.DataFrame(), pd.DataFrame(), "{}"
 
     # Auto-save
     try:
@@ -136,9 +190,10 @@ def evaluate_response(
 
     summary_md = generate_display_summary(result)
     scores_df = _scores_to_df(result)
+    metrics_df = _metrics_to_df(result)
     report_json = json.dumps(generate_json_report(result), indent=2)
 
-    return summary_md, scores_df, report_json
+    return summary_md, scores_df, metrics_df, report_json
 
 
 # ---------------------------------------------------------------------------
@@ -288,11 +343,12 @@ def build_conversation(
     num_turns: int,
     scenario_tags: list[str],
     include_eval: bool,
+    builder_model: str = DEFAULT_BUILDER_MODEL,
 ) -> tuple[str, str, str, str]:
     if not user_query.strip():
         return "⚠️ Please enter a query.", "", "{}", ""
 
-    builder = get_builder()
+    builder = get_builder(builder_model=builder_model)
 
     try:
         result = builder.build(
@@ -375,7 +431,11 @@ def create_app() -> gr.Blocks:
                         )
                         llm_toggle = gr.Checkbox(
                             label="Run LLM Judge (Claude)",
-                            value=True,
+                            value=False,
+                        )
+                        llm_cost_warning = gr.Markdown(
+                            value="",
+                            visible=False,
                         )
                         eval_btn = gr.Button("🔍 Evaluate", variant="primary")
 
@@ -392,12 +452,20 @@ def create_app() -> gr.Blocks:
                     with gr.Column():
                         scores_table = gr.DataFrame(label="Principle Scores")
 
+                metrics_table = gr.DataFrame(label="Quality Metrics (M1–M5)")
                 json_out = gr.Code(label="Full JSON Report", language="json", lines=20)
 
-                eval_btn.click(
-                    fn=evaluate_response,
-                    inputs=[scenario_dd, version_id_box, response_box, llm_toggle],
-                    outputs=[summary_out, scores_table, json_out],
+                llm_toggle.change(
+                    fn=lambda on: gr.update(
+                        value=(
+                            "> ⚠️ **Cost warning:** LLM judge makes **10 Sonnet calls** (P1–P10) "
+                            "+ up to **3 Haiku calls** (M1–M3) per evaluation. "
+                            "Batch eval and Conversation Builder multiply this further."
+                        ) if on else "",
+                        visible=on,
+                    ),
+                    inputs=[llm_toggle],
+                    outputs=[llm_cost_warning],
                 )
 
                 gr.Markdown(
@@ -443,8 +511,18 @@ def create_app() -> gr.Blocks:
                     value=SCENARIO_CHOICES[0],
                 )
                 with gr.Row():
-                    version_a_dd = gr.Dropdown(choices=[], label="Version A (baseline)")
-                    version_b_dd = gr.Dropdown(choices=[], label="Version B (new)")
+                    _initial_versions = _store.list_all_version_ids(SCENARIOS[0].id)
+                    _initial_choices = _initial_versions if _initial_versions else ["(no saved versions)"]
+                    version_a_dd = gr.Dropdown(
+                        choices=_initial_choices,
+                        value=_initial_choices[0],
+                        label="Version A (baseline)",
+                    )
+                    version_b_dd = gr.Dropdown(
+                        choices=_initial_choices,
+                        value=_initial_choices[-1],
+                        label="Version B (new)",
+                    )
 
                 comp_scenario_dd.change(
                     fn=load_version_choices,
@@ -517,21 +595,62 @@ def create_app() -> gr.Blocks:
                     lines=20,
                 )
 
-                build_btn.click(
-                    fn=build_conversation,
-                    inputs=[
-                        query_box, industry_dd, num_turns_slider,
-                        tags_checkboxes, include_eval_cb,
-                    ],
-                    outputs=[
-                        conv_display, eval_summary_out,
-                        json_builder_out, improvement_tips_out,
-                    ],
-                )
-
                 gr.Markdown(
                     "**Example query:** _We need ergonomic chairs for 3 office floors, 200 units, ~USD 400/unit, 2-week delivery_  →  Industry: Furniture"
                 )
+
+            # ----------------------------------------------------------------
+            # Tab 5: Settings
+            # ----------------------------------------------------------------
+            with gr.Tab("⚙️ Settings"):
+                gr.Markdown(
+                    "### Model Configuration\n"
+                    "Select which Claude model each component uses. Changes apply immediately — no restart needed.\n\n"
+                    "Use the **Version Comparison** tab to check whether a cheaper model produces equivalent scores for your use case."
+                )
+                with gr.Column():
+                    judge_model_dd = gr.Dropdown(
+                        choices=MODEL_CHOICES,
+                        value=DEFAULT_JUDGE_MODEL,
+                        label="P1–P10 LLM Judge",
+                        info="Scores responses against the 10 principles. 10 calls per evaluation.",
+                    )
+                    metric_model_dd = gr.Dropdown(
+                        choices=MODEL_CHOICES,
+                        value=DEFAULT_METRIC_MODEL,
+                        label="M1–M3 Quality Metrics",
+                        info="Computes Faithfulness, Answer Relevance, Groundedness. Up to 3 calls per evaluation.",
+                    )
+                    builder_model_dd = gr.Dropdown(
+                        choices=MODEL_CHOICES,
+                        value=DEFAULT_BUILDER_MODEL,
+                        label="Conversation Builder",
+                        info="Generates multi-turn example conversations. 1 call per build.",
+                    )
+                gr.Markdown(
+                    "> **Note:** Settings reset to defaults when you restart the app."
+                )
+
+        # Wire model dropdowns into Tab 1 evaluate button
+        eval_btn.click(
+            fn=evaluate_response,
+            inputs=[scenario_dd, version_id_box, response_box, llm_toggle, judge_model_dd, metric_model_dd],
+            outputs=[summary_out, scores_table, metrics_table, json_out],
+        )
+
+        # Wire model dropdown into Tab 4 builder button
+        build_btn.click(
+            fn=build_conversation,
+            inputs=[
+                query_box, industry_dd, num_turns_slider,
+                tags_checkboxes, include_eval_cb,
+                builder_model_dd,
+            ],
+            outputs=[
+                conv_display, eval_summary_out,
+                json_builder_out, improvement_tips_out,
+            ],
+        )
 
     return app
 
@@ -541,6 +660,16 @@ def create_app() -> gr.Blocks:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    # Load .env file if present
+    _env_path = os.path.join(os.path.dirname(__file__), ".env")
+    if os.path.exists(_env_path):
+        with open(_env_path) as _f:
+            for _line in _f:
+                _line = _line.strip()
+                if _line and not _line.startswith("#") and "=" in _line:
+                    _k, _v = _line.split("=", 1)
+                    os.environ.setdefault(_k.strip(), _v.strip())
+
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         logger.warning(

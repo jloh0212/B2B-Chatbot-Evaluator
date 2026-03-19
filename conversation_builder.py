@@ -163,8 +163,9 @@ Return ONLY the JSON array, no markdown, no explanation."""
 # ---------------------------------------------------------------------------
 
 class ConversationBuilder:
-    def __init__(self, api_key: str | None = None):
+    def __init__(self, api_key: str | None = None, builder_model: str = MODEL):
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+        self.builder_model = builder_model
         self._client: anthropic.Anthropic | None = None
 
     @property
@@ -193,7 +194,7 @@ class ConversationBuilder:
 
         try:
             response = self.client.messages.create(
-                model=MODEL,
+                model=self.builder_model,
                 max_tokens=4096,
                 temperature=BUILDER_TEMPERATURE,
                 system=BUILDER_SYSTEM_PROMPT,

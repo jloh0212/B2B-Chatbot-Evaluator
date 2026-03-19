@@ -61,7 +61,7 @@ def generate_json_report(result: EvaluationResult) -> dict:
         })
 
     return {
-        "report_version": "1.0",
+        "report_version": "1.1",
         "run_id": result.run_id,
         "timestamp": result.timestamp,
         "version_id": result.version_id,
@@ -72,6 +72,19 @@ def generate_json_report(result: EvaluationResult) -> dict:
         "score_label": result.score_label,
         "risk_flags": result.risk_flags,
         "principle_results": principle_results_json,
+        "metric_results": {
+            m_id: {
+                "metric_id": mr.metric_id,
+                "name": mr.name,
+                "score": mr.score,
+                "score_label": mr.score_label,
+                "method": mr.method,
+                "rationale": mr.rationale,
+                "evidence": mr.evidence,
+                "raw_flags": mr.raw_flags,
+            }
+            for m_id, mr in result.metric_results.items()
+        },
         "top_gaps": top_gaps_json,
         "eval_metadata": result.eval_metadata,
     }
@@ -133,5 +146,31 @@ def generate_display_summary(result: EvaluationResult) -> str:
             if gap.fix_example:
                 lines.append(f"- Fix: _{gap.fix_example[:120]}_")
             lines.append("")
+
+    # Quality Metrics section
+    if result.metric_results:
+        lines.append("### Quality Metrics")
+        lines.append("")
+        lines.append("| Metric | Score | Label | Method | Rationale |")
+        lines.append("|--------|-------|-------|--------|-----------|")
+        for m_id in ["M1", "M2", "M3", "M4", "M5"]:
+            if m_id not in result.metric_results:
+                continue
+            mr = result.metric_results[m_id]
+            if mr.score is None:
+                emoji = "⬜"
+                score_str = "N/A"
+            elif mr.score >= 0.75:
+                emoji = "🟢"
+                score_str = f"{mr.score:.0%}"
+            elif mr.score >= 0.50:
+                emoji = "🟡"
+                score_str = f"{mr.score:.0%}"
+            else:
+                emoji = "🔴"
+                score_str = f"{mr.score:.0%}"
+            rationale_short = mr.rationale[:80] if mr.rationale else "—"
+            lines.append(f"| {m_id}: {mr.name} | {emoji} {score_str} | {mr.score_label} | {mr.method} | {rationale_short} |")
+        lines.append("")
 
     return "\n".join(lines)

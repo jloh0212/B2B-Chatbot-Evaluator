@@ -1,7 +1,7 @@
 # B2B Chatbot Evaluator — Product Plan
 
-**Version:** 1.0
-**Last updated:** 2026-03-18
+**Version:** 1.2
+**Last updated:** 2026-03-19
 **Status:** Built and running
 
 ---
@@ -137,14 +137,14 @@ Rule violations cap the maximum score regardless of the LLM judge:
 
 ---
 
-## The Four App Tabs
+## The Five App Tabs
 
 ### Tab 1 — Evaluate Response
 
 Paste a single chatbot response and evaluate it.
 
 **Inputs:**
-- **Scenario** — select from 16 pre-built test scenarios (4 industries × 4 scenarios each)
+- **Scenario** — select from 60 pre-built test scenarios across 12 agent types and 4 industries
 - **Version ID** — a label for this evaluation run (e.g. `v1`, `baseline`, `after-fix`); used for version comparison
 - **Response** — the chatbot response text to evaluate
 - **Run LLM Judge** — whether to use Claude as a judge (more accurate but uses API credits); uncheck for rule-checks-only (free, instant)
@@ -181,13 +181,30 @@ Evaluate multiple responses at once from a file.
 
 Compare two evaluation runs of the same scenario to track improvement or regression.
 
+**How versioning works:**
+
+Every time you click Evaluate in Tab 1, the app automatically saves the result as a file on your Mac. You don't have to do anything — it happens in the background. Think of it like a camera that takes a photo every time you press the shutter — each photo is saved with a timestamp so you can look back at any of them later.
+
+The **Version ID** is the label you type before evaluating — it's how you tell runs apart. It can be anything: `v1`, `before-fix`, `haiku-test`, `march-19`. Think of it like writing a date on the back of a photo.
+
+All saved files live in `eval/data/versions/` on your Mac. Each file is named after the scenario, the version ID, and the time it was saved — for example:
+```
+ELEC-01__sonnet-v1__2026-03-19T18-07-17.json
+```
+
+**Tab 3 lets you place two of those saved results side by side** — pick the same scenario, pick two version IDs, and the app shows you exactly what changed: which principles improved, which regressed, which violations appeared or disappeared.
+
+**Can users access these versions?**
+
+Currently only through the app UI (Tab 3). The files exist on your Mac but cannot be downloaded directly from the browser. To share a result, you can copy the JSON from the Full JSON Report box in Tab 1, or navigate to `eval/data/versions/` in Finder and share the `.json` file directly. A one-click export button is on the roadmap.
+
 **Workflow:**
 1. Run the same scenario in Tab 1 twice with different version IDs (e.g. `v1` and `v2`)
 2. Come to Tab 3, select the scenario and the two versions
 3. Click Compare
 
 **Outputs:**
-- **Summary** — one-paragraph human-readable summary of what changed
+- **Summary** — one sentence: which version scored higher and by how much
 - **Delta table** — score A | score B | delta | direction (↑ Improved / ↓ Regressed / = Unchanged) per principle
 - **Violation changes** — new violations introduced and violations resolved between versions
 
@@ -201,7 +218,7 @@ Generate a complete principles-compliant multi-turn B2B conversation from a natu
 - **Query** — describe a B2B procurement need in plain English (e.g. "We need 50 laptops for a field sales team, ~$1,000/unit")
 - **Industry** — Electronics / Fashion / Grocery / Furniture
 - **Number of turns** — 2 to 6 turns
-- **Scenario tags** — optional focus areas (verification, volume_pricing, error_handling, handoff, product_discovery, safety)
+- **Scenario tags** — optional hints that shape *what happens* in the conversation (e.g. `verification` nudges the builder to include a stock/price verification step; `handoff` nudges it to include a specialist escalation). Tags affect the generated content but do not change how the conversation is scored.
 - **Auto-evaluate** — runs rule checks on each assistant turn after generation
 
 **Outputs:**
@@ -211,6 +228,38 @@ Generate a complete principles-compliant multi-turn B2B conversation from a natu
 - **JSON output** — the full `ConversationResult` object (downloadable)
 
 The builder uses Claude with `temperature=0.3` to produce natural dialogue variety while enforcing all 10 principles as hard constraints.
+
+---
+
+### Tab 5 — Settings
+
+Configure which Claude model each component of the app uses. Changes apply immediately without restarting.
+
+**Three dropdowns:**
+
+| Component | Default | What it does |
+|-----------|---------|--------------|
+| P1–P10 LLM Judge | `claude-sonnet-4-6` | Scores responses against the 10 principles |
+| M1–M3 Quality Metrics | `claude-haiku-4-5-20251001` | Computes Faithfulness, Answer Relevance, Groundedness |
+| Conversation Builder | `claude-sonnet-4-6` | Generates multi-turn example conversations |
+
+**Why this exists:**
+
+Right now the app has the model hardcoded — like a kitchen appliance where the temperature is fixed at the factory. You can't change it without editing the code.
+
+This tab adds three simple dropdowns — one for each "brain" the app uses:
+
+1. **Judge** — the model that scores your chatbot responses against the 10 principles
+2. **Metrics** — the model that computes M1–M3 quality scores
+3. **Builder** — the model that generates example conversations
+
+You pick the model from each dropdown (Haiku, Sonnet, or Opus), and from that point forward the app uses your selection. No code editing, no restart.
+
+This lets you answer the question: *is Sonnet actually worth the extra cost for scoring?* Run the same response through Haiku and Sonnet, then compare the results side by side using the Version Comparison tab.
+
+**What gets recorded:** The model used is written into every saved JSON report under `eval_metadata`, so version comparisons automatically show if you switched models between runs.
+
+**Note:** Settings reset to defaults when you restart the app. They are not saved to disk.
 
 ---
 
@@ -252,7 +301,7 @@ The LLM score is capped by the worst rule violation found. This means the LLM ca
 
 ```
 eval/
-├── app.py                    # Gradio UI — 4 tabs
+├── app.py                    # Gradio UI — 5 tabs (includes Settings)
 ├── evaluator.py              # Core eval engine: rule checks + LLM judge + score capping
 ├── rubric.py                 # Scoring definitions 1–5 per principle (data only)
 ├── scenarios.py              # 16 fixed deterministic test scenarios
@@ -313,7 +362,7 @@ eval/
 | Format | Starts with `sk-ant-api03-...` |
 | Where it's stored | `eval/.env` — local only, never transmitted anywhere except Anthropic's API |
 | When it's used | Tab 1 (LLM Judge), Tab 4 (Conversation Builder). Rule-only checks do not use the API. |
-| Cost | Each evaluation with LLM judge makes ~10 API calls (one per principle). Tab 4 makes 1 call per conversation build. Uses `claude-sonnet-4-6`. |
+| Cost | Each evaluation with LLM judge makes ~10 API calls (one per principle) + up to 3 Haiku calls (M1–M3 metrics). Tab 4 makes 1 call per conversation build. Default models: `claude-sonnet-4-6` for judging, `claude-haiku-4-5-20251001` for metrics. Configurable in Tab 5. |
 | If the key expires | Update the value in `eval/.env` — no other changes needed |
 | Sharing the folder | `.env` travels with the folder. Each person using the app should replace the key with their own. |
 
@@ -559,7 +608,7 @@ These are the natural next steps if you want to extend the app:
 | High | **Scenario editor** — add custom scenarios via the UI without editing code | Currently scenarios are hardcoded in `scenarios.py` |
 | High | **Prompt template editor** — edit the LLM judge prompts from the UI | Lets you tune the scoring criteria without touching code |
 | Medium | **Trend dashboard** — chart composite scores across versions over time | Tab 3 shows one comparison at a time; a chart would show improvement trajectory |
-| Medium | **Bulk conversation builder** — generate N conversations from a list of queries | Useful for generating training data or test suites at scale |
+| Medium | **Auto turn count in Conversation Builder** — infer the right number of turns from the scenario type rather than using a fixed default (e.g. 2 turns for stock checks, 4 for qualification → recommendation flows, 5-6 for complex multi-SKU orders) | Currently defaults to 4 turns for all scenarios; P3 (Efficiency) penalises unnecessary back-and-forth |
 | Medium | **Principle deep-dive view** — click a principle to see full rubric + all evidence | Currently only top gaps are shown; full detail lives in JSON |
-| Low | **Multi-user / team mode** — shared version store with user labels | Currently single-user local only |
+| Low | **Tone adjuster in Conversation Builder** — add a dropdown to control the agent's register (e.g. formal vs conversational, brief vs detailed) so the same scenario can be generated in different styles. Useful for testing whether tone variation affects scoring or for generating training examples across different buyer archetypes | Tags control *what happens*; tone adjuster controls *how it sounds* — they are complementary, not alternatives |
 | Low | **Webhook / CI integration** — POST a response, get back a JSON score | Lets you integrate evaluation into a CI pipeline or Slack bot |
